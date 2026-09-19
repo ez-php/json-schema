@@ -1,6 +1,6 @@
 {
   "name": "ez-php/json-schema",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Reflection/attribute-driven JSON Schema emission for plain PHP classes",
   "type": "library",
   "license": "MIT",
