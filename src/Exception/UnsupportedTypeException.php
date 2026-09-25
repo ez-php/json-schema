@@ -12,6 +12,9 @@ namespace EzPhp\JsonSchema\Exception;
  */
 final class UnsupportedTypeException extends JsonSchemaException
 {
+    /**
+     * Build the exception for a property whose type cannot be mapped to JSON Schema.
+     */
     public static function forProperty(string $class, string $property, string $reason): self
     {
         return new self(sprintf('Cannot derive a JSON Schema type for %s::$%s: %s.', $class, $property, $reason));
