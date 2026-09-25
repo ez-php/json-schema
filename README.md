@@ -70,6 +70,11 @@ produces:
   types). A property typed `int|string` throws `UnsupportedTypeException`.
 - No PHPDoc-driven array item typing (e.g. `array<Foo>`) — `array` properties always emit
   `{"type": "array"}` with no `items` constraint.
+- No recursive class graphs. Nested classes are inlined, so a property whose type is the
+  class itself (`?Node $next`) or an enclosing class (`Parent` → `Child` → `Parent`) throws
+  `UnsupportedTypeException` instead of recursing forever; there is no `$ref`/`$defs`
+  output. Reusing one class in several sibling properties (`Address $billing`,
+  `Address $shipping`) is fine.
 - No JSON Schema validation against a value — this package only *emits* schemas. Validating
   data against a schema is the `ez-php/validation` module's job, or an external library.
 

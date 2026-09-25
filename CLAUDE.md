@@ -241,7 +241,7 @@ Only set a port for services the module actually uses. Modules without external 
 
 > The `MEILISEARCH_PORT` column is the **host** port. Inside a Compose network the service is always reachable at `http://meilisearch:7700` regardless of the host mapping — only publish-side ports need to be unique.
 
-> The "Redis host port" column is likewise the **host**-published port. `ez-php/cache`, `ez-php/queue`, and `ez-php/rate-limiter` map it through a separate `REDIS_HOST_PORT` env var in `docker-compose.yml`, keeping `REDIS_PORT` fixed at `6379` for in-container connections (the app container always reaches Redis at `redis:6379` over the Compose network, regardless of the host mapping) — the root project and the `ez-php/` application template are the two exceptions, since both have no host/container split and use `REDIS_PORT` for both (the template's other in-container Redis settings — `CACHE_REDIS_PORT`, `QUEUE_REDIS_PORT`, `RATE_LIMITER_REDIS_PORT` — stay fixed at `6379` regardless, same as every other module).
+> The "Redis host port" column is likewise the **host**-published port. `ez-php/cache`, `ez-php/queue`, and `ez-php/rate-limiter` map it through a separate `REDIS_HOST_PORT` env var in `docker-compose.yml`, keeping `REDIS_PORT` fixed at `6379` for in-container connections (the app container always reaches Redis at `redis:6379` over the Compose network, regardless of the host mapping) — the root project and the `ez-php/` application template are the two exceptions, since both have no host/container split and use `REDIS_PORT` for both (the template's other in-container Redis settings — `CACHE_REDIS_PORT`, `QUEUE_REDIS_PORT`, `RATE_LIMITER_REDIS_PORT`, `HEALTH_REDIS_PORT` — stay fixed at `6379` regardless, same as every other module).
 
 > This table tracks only MySQL, Redis, and Meilisearch ports — the three services shared across multiple modules where a collision is otherwise easy to introduce. Mailpit is the one other service with published host ports: SMTP `1025` and web UI `8025`. `ez-php/mail` maps them through `MAILPIT_SMTP_HOST_PORT`/`MAILPIT_API_HOST_PORT` in `modules/mail/docker-compose.yml` (mirroring the `*_HOST_PORT` pattern above, documented in `modules/mail/.env.example`); the root project and the `ez-php/` template each run their own Mailpit on the same defaults (`MAIL_PORT`/`MAIL_WEB_PORT`), so **these three stacks cannot run at the same time** without overriding those variables. It isn't a table column because no module beyond those three runs Mailpit — but a new module adding its own single-use service's ports should likewise parameterize them and document the defaults in its own `.env.example` rather than adding a column here.
 
@@ -274,11 +274,19 @@ src/
 tests/
   TestCase.php                  — module's PHPUnit base class
   SchemaGeneratorTest.php        — scalar/enum/nested-object mapping, nullable/default
-                                    handling, ignored properties, unsupported-type errors
+                                    handling, ignored properties, unsupported-type errors,
+                                    recursive-reference rejection, #[Property] fields,
+                                    untyped/intersection errors, depth-3 nesting
   Fixtures/
     Address.php, Status.php, Person.php, Event.php — fixture classes exercising nested
       objects, backed enums, DateTimeInterface, nullable-with-default properties
     UnsupportedUnion.php, MixedProperty.php — fixtures for the unsupported-type error paths
+    JsonSchemaTreeNode.php, JsonSchemaCycleParent.php, JsonSchemaCycleChild.php — self- and
+      mutual-reference fixtures for the recursive-reference rejection
+    JsonSchemaOrder.php         — sibling reuse of one class (must not count as a cycle)
+    JsonSchemaConstrained.php   — every #[Property] field, incl. on a nullable property
+    JsonSchemaUntyped.php, JsonSchemaIntersection.php — untyped / intersection-type error paths
+    JsonSchemaCompany.php       — depth-3 nesting (Company → Person → Address)
 ```
 
 ---
@@ -289,7 +297,9 @@ tests/
   every public, non-static property (skipping ones carrying `#[Ignore]`), maps each
   property's declared type to a JSON Schema fragment, applies any `#[Property(...)]`
   override, and collects properties without a default/nullable type into `required`.
-  Nested class-typed properties recurse into `generate()` for that class.
+  Nested class-typed properties recurse into `generate()` for that class; a stack of the
+  classes on the current path (`$ancestors`, pushed/popped in `try`/`finally`) rejects a
+  recursive reference before it recurses.
 - **`Attribute\Property`** — a plain data-holder attribute; `SchemaGenerator` merges its
   non-null fields into the fragment it already derived from reflection, so it only ever
   adds detail (description, format, pattern, minimum, maximum) rather than replacing the
@@ -316,6 +326,12 @@ tests/
   supporting that generally would mean guessing which PHP union member a given JSON value
   round-trips to — out of scope for a first pass (see README "What it does not do").
   `mixed` is likewise rejected, consistent with the project's "avoid `mixed`" guideline.
+- **Recursive class graphs are rejected, not referenced.** Nested classes are inlined, so a
+  self- or mutually-referencing class would recurse forever. `SchemaGenerator` tracks the
+  classes on the current path (ancestors, not every class seen, so sibling reuse such as
+  `Address $billing` + `Address $shipping` still works) and throws `UnsupportedTypeException`
+  from the property that closes the cycle. Emitting `$ref`/`$defs` instead would change the
+  output shape for every consumer (including `ez-php/openapi`) and is out of scope here.
 - **No PHPDoc parsing.** Array item types (`array<Foo>`), template generics, and similar
   are PHPDoc-only conventions with no reflection API — an `array`-typed property always
   emits a bare `{"type": "array"}`. Adding items-type inference would require a PHPDoc
@@ -354,3 +370,4 @@ tests/
 | OpenAPI document assembly (`#/components/schemas`, paths, `$ref` wiring) | `ez-php/openapi`, which may optionally call `SchemaGenerator` per-DTO but owns the surrounding document |
 | PHPDoc-based generics/array-item type inference | Out of scope — would require a PHPDoc parser dependency; `array` properties stay untyped (`{"type": "array"}`) |
 | General union-type (`oneOf`) support | Out of scope for this first pass — only "single type, optionally nullable" is supported |
+| `$ref`/`$defs` output for recursive class graphs | Out of scope — recursive references are rejected with `UnsupportedTypeException` |

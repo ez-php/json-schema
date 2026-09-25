@@ -22,15 +22,44 @@ use UnitEnum;
  * Derives a JSON Schema document from a plain PHP class's typed properties,
  * using reflection plus optional {@see PropertyAttribute} / {@see Ignore} attributes.
  *
+ * Recursive class graphs (a property whose type is the class itself, or an
+ * ancestor on the current path) are rejected with UnsupportedTypeException:
+ * inlining them would never terminate, and `$ref`/`$defs` emission is not
+ * supported. Reusing a class in sibling properties is not a cycle and is fine.
+ *
  * @package EzPhp\JsonSchema
  */
 final class SchemaGenerator
 {
     /**
+     * Classes on the current generate() path, used to detect recursive references.
+     *
+     * @var list<class-string>
+     */
+    private array $ancestors = [];
+
+    /**
+     * @param class-string $class
+     * @return array{type: string, properties: array<string, array<string, mixed>>, required: list<string>}
+     *
+     * @throws UnsupportedTypeException When a property's type cannot be mapped, including recursive class references.
+     */
+    public function generate(string $class): array
+    {
+        $this->ancestors[] = $class;
+
+        try {
+            return $this->generateObject($class);
+        } finally {
+            array_pop($this->ancestors);
+        }
+    }
+
+    /**
      * @param class-string $class
      * @return array{type: string, properties: array<string, array<string, mixed>>, required: list<string>}
      */
-    public function generate(string $class): array
+    private function generateObject(string $class): array
     {
         $reflection = new ReflectionClass($class);
         $constructor = $reflection->getConstructor();
@@ -181,6 +210,10 @@ final class SchemaGenerator
         }
 
         if (class_exists($typeName)) {
+            if (in_array($typeName, $this->ancestors, true)) {
+                throw UnsupportedTypeException::forProperty($class, $property->getName(), sprintf('recursive reference to "%s" is not supported', $typeName));
+            }
+
             return $this->generate($typeName);
         }
 
