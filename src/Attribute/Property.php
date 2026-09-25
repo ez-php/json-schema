@@ -15,6 +15,15 @@ use Attribute;
 #[Attribute(Attribute::TARGET_PROPERTY)]
 final class Property
 {
+    /**
+     * Property Constructor
+     *
+     * @param string|null $description
+     * @param string|null $format
+     * @param string|null $pattern
+     * @param float|null  $minimum
+     * @param float|null  $maximum
+     */
     public function __construct(
         public readonly ?string $description = null,
         public readonly ?string $format = null,
