@@ -64,17 +64,23 @@ produces:
 - `#[EzPhp\JsonSchema\Attribute\Ignore]` — excludes a property from the generated schema
   entirely.
 
+## Unions and recursive classes
+
+- `int|string` → `{"anyOf": [{"type": "string"}, {"type": "integer"}]}`; a nullable union adds
+  `{"type": "null"}`. (`anyOf`, not `oneOf`: PHP accepts a value that matches any member.)
+- A property that refers back to a class on the current path becomes a `$ref` — `#` for the
+  generated class, `#/$defs/<Name>` (with a `$defs` section) for any other.
+- `generateDefinitions(Foo::class)` returns `Foo` and every class on a cycle as a
+  `name → schema` map; pass the prefix for the embedding document to the constructor, e.g.
+  `new SchemaGenerator('#/components/schemas/')` (what `ez-php/openapi` does).
+
 ## What it does not do
 
-- No union type support beyond a single non-null type plus `null` (i.e. plain nullable
-  types). A property typed `int|string` throws `UnsupportedTypeException`.
 - No PHPDoc-driven array item typing (e.g. `array<Foo>`) — `array` properties always emit
   `{"type": "array"}` with no `items` constraint.
-- No recursive class graphs. Nested classes are inlined, so a property whose type is the
-  class itself (`?Node $next`) or an enclosing class (`Parent` → `Child` → `Parent`) throws
-  `UnsupportedTypeException` instead of recursing forever; there is no `$ref`/`$defs`
-  output. Reusing one class in several sibling properties (`Address $billing`,
-  `Address $shipping`) is fine.
+- No `$ref` for plain reuse — nested classes are inlined; only a recursive reference
+  (`?Node $next`, `Parent` → `Child` → `Parent`) becomes a `$ref` (`#` for the root class,
+  `#/$defs/<Name>` otherwise).
 - No JSON Schema validation against a value — this package only *emits* schemas. Validating
   data against a schema is the `ez-php/validation` module's job, or an external library.
 

@@ -9,10 +9,12 @@ use EzPhp\JsonSchema\SchemaGenerator;
 use Tests\Fixtures\Event;
 use Tests\Fixtures\JsonSchemaCompany;
 use Tests\Fixtures\JsonSchemaConstrained;
+use Tests\Fixtures\JsonSchemaCycleHolder;
 use Tests\Fixtures\JsonSchemaCycleParent;
 use Tests\Fixtures\JsonSchemaIntersection;
 use Tests\Fixtures\JsonSchemaOrder;
 use Tests\Fixtures\JsonSchemaTreeNode;
+use Tests\Fixtures\JsonSchemaUnions;
 use Tests\Fixtures\JsonSchemaUntyped;
 use Tests\Fixtures\MixedProperty;
 use Tests\Fixtures\Person;
@@ -84,11 +86,25 @@ final class SchemaGeneratorTest extends TestCase
         );
     }
 
-    public function testUnionTypeIsUnsupported(): void
+    public function testUnionTypeBecomesAnyOf(): void
     {
-        $this->expectException(UnsupportedTypeException::class);
+        $schema = $this->generator->generate(UnsupportedUnion::class);
 
-        $this->generator->generate(UnsupportedUnion::class);
+        // Members come in PHP's canonical union order (string before int).
+        self::assertSame(['anyOf' => [['type' => 'string'], ['type' => 'integer']]], $schema['properties']['value']);
+    }
+
+    public function testUnionsOfClassesAndNullableUnions(): void
+    {
+        $schema = $this->generator->generate(JsonSchemaUnions::class);
+
+        self::assertSame('object', self::dig($schema, 'properties', 'target', 'anyOf', 0, 'type'));
+        self::assertSame(['active', 'inactive'], self::dig($schema, 'properties', 'target', 'anyOf', 1, 'enum'));
+        self::assertSame(
+            ['anyOf' => [['type' => 'integer'], ['type' => 'number'], ['type' => 'null']], 'default' => null],
+            self::dig($schema, 'properties', 'amount'),
+        );
+        self::assertSame(['id', 'target'], $schema['required']);
     }
 
     public function testMixedTypeIsUnsupported(): void
@@ -98,20 +114,44 @@ final class SchemaGeneratorTest extends TestCase
         $this->generator->generate(MixedProperty::class);
     }
 
-    public function testSelfReferencingClassIsRejectedInsteadOfRecursingForever(): void
+    public function testSelfReferenceBecomesARefToTheRoot(): void
     {
-        $this->expectException(UnsupportedTypeException::class);
-        $this->expectExceptionMessage('JsonSchemaTreeNode::$next: recursive reference');
+        $schema = $this->generator->generate(JsonSchemaTreeNode::class);
 
-        $this->generator->generate(JsonSchemaTreeNode::class);
+        self::assertSame(['anyOf' => [['$ref' => '#'], ['type' => 'null']], 'default' => null], $schema['properties']['next']);
+        self::assertArrayNotHasKey('$defs', $schema);
     }
 
-    public function testMutuallyReferencingClassesAreRejected(): void
+    public function testMutualReferenceBackToTheRootUsesTheRootRef(): void
     {
-        $this->expectException(UnsupportedTypeException::class);
-        $this->expectExceptionMessage('JsonSchemaCycleChild::$parent: recursive reference');
+        $schema = $this->generator->generate(JsonSchemaCycleParent::class);
 
-        $this->generator->generate(JsonSchemaCycleParent::class);
+        self::assertSame(
+            ['anyOf' => [['$ref' => '#'], ['type' => 'null']], 'default' => null],
+            self::dig($schema, 'properties', 'child', 'properties', 'parent'),
+        );
+    }
+
+    public function testACycleBelowTheRootGoesIntoDefs(): void
+    {
+        $schema = $this->generator->generate(JsonSchemaCycleHolder::class);
+        $parentRef = ['anyOf' => [['$ref' => '#/$defs/JsonSchemaCycleParent'], ['type' => 'null']], 'default' => null];
+
+        self::assertSame('object', self::dig($schema, 'properties', 'family', 'type'));
+        self::assertSame(['JsonSchemaCycleParent'], array_keys((array) self::dig($schema, '$defs')));
+        self::assertSame($parentRef, self::dig($schema, 'properties', 'family', 'properties', 'child', 'properties', 'parent'));
+        self::assertSame($parentRef, self::dig($schema, '$defs', 'JsonSchemaCycleParent', 'properties', 'child', 'properties', 'parent'));
+    }
+
+    public function testGenerateDefinitionsNamesTheRootAndUsesTheGivenPrefix(): void
+    {
+        $definitions = (new SchemaGenerator('#/components/schemas/'))->generateDefinitions(JsonSchemaTreeNode::class);
+
+        self::assertSame(['JsonSchemaTreeNode'], array_keys($definitions));
+        self::assertSame(
+            ['anyOf' => [['$ref' => '#/components/schemas/JsonSchemaTreeNode'], ['type' => 'null']], 'default' => null],
+            self::dig($definitions, 'JsonSchemaTreeNode', 'properties', 'next'),
+        );
     }
 
     public function testSameClassUsedByTwoSiblingPropertiesIsNotACycle(): void
@@ -131,15 +171,18 @@ final class SchemaGeneratorTest extends TestCase
         self::assertSame($address, $schema['properties']['shipping']);
     }
 
-    public function testGeneratorIsReusableAfterRejectingACycle(): void
+    public function testGeneratorIsReusableAfterAFailedRun(): void
     {
         try {
-            $this->generator->generate(JsonSchemaTreeNode::class);
+            $this->generator->generate(MixedProperty::class);
             self::fail('Expected UnsupportedTypeException.');
         } catch (UnsupportedTypeException) {
         }
 
+        $this->generator->generate(JsonSchemaCycleHolder::class);
         $schema = $this->generator->generate(JsonSchemaOrder::class);
+
+        self::assertArrayNotHasKey('$defs', $schema);
 
         self::assertSame(['billing', 'shipping'], $schema['required']);
     }
@@ -198,5 +241,23 @@ final class SchemaGeneratorTest extends TestCase
             $ceo['properties']['address']['properties'],
         );
         self::assertSame(['name', 'ceo'], $schema['required']);
+    }
+
+    /**
+     * Walk nested arrays, asserting each level is an array.
+     *
+     * @param array<array-key, mixed> $data
+     */
+    private static function dig(array $data, string|int ...$keys): mixed
+    {
+        $value = $data;
+
+        foreach ($keys as $key) {
+            self::assertIsArray($value);
+            self::assertArrayHasKey($key, $value);
+            $value = $value[$key];
+        }
+
+        return $value;
     }
 }

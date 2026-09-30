@@ -28,10 +28,11 @@ docker compose exec app composer full
 Executes in order:
 1. `sync_guidelines.php --check` — fails if any `CLAUDE.md` has drifted from this file
 2. `check_test_classes.php` — fails on a duplicate test class name (all packages share the `Tests\` namespace, so a collision is a fatal error in the aggregated run, not a test failure)
-3. `phpstan analyse` — static analysis, level 9, config: `phpstan.neon`
-4. `php-cs-fixer fix` — auto-fixes style (`@PSR12` + `@PHP83Migration` + strict rules)
+3. `check_module_deps.php` — fails when a package's code imports an ez-php package its `composer.json` does not declare (module `src`: `require`/`suggest`; tests: `require`/`require-dev` and their dependencies), or requires one it never uses
+4. `phpstan analyse` — static analysis, level 9, config: `phpstan.neon`
+5. `php-cs-fixer fix` — auto-fixes style (`@PSR12` + `@PHP83Migration` + strict rules)
    *(Note: `@PHP85Migration` does not exist yet in php-cs-fixer; `@PHP83Migration` is the highest available and is used intentionally even though the project targets PHP 8.5)*
-5. `phpunit` — all tests with coverage
+6. `phpunit` — all tests with coverage
 
 Individual commands when needed:
 ```
@@ -40,6 +41,7 @@ composer cs                  # CS Fixer only
 composer test                # PHPUnit only
 composer guidelines:check    # CLAUDE.md drift only
 composer test-classes:check  # duplicate test class names only
+composer module-deps:check   # undeclared / unused ez-php package dependencies only
 ```
 
 **PHPStan:** never suppress with `@phpstan-ignore-line` — always fix the root cause.
@@ -198,20 +200,22 @@ vendor/bin/docker-init
 
 This copies `Dockerfile`, `docker-compose.yml`, `.env.example`, `start.sh`, and `docker/` into the module, replacing `{{MODULE_NAME}}` placeholders. Existing files are never overwritten.
 
-Pass `--services` to merge MySQL/Redis/Meilisearch service definitions directly into `docker-compose.yml` and uncomment the matching sections in `.env.example`, instead of adapting them by hand afterward:
+Pass `--services` to merge MySQL/Redis/Meilisearch/Memcached/Mailpit service definitions directly into `docker-compose.yml` and uncomment the matching sections in `.env.example`, instead of adapting them by hand afterward:
 
 ```
 vendor/bin/docker-init --services=mysql
 vendor/bin/docker-init --services=redis
 vendor/bin/docker-init --services=meilisearch
 vendor/bin/docker-init --services=mysql,redis
+vendor/bin/docker-init --services=memcached,mailpit
 ```
 
-Pass `--extensions` to merge PHP extension install blocks (apt packages plus `docker-php-ext-install`/`pecl` lines) directly into `docker/app/Dockerfile`, instead of hand-editing it afterward — supported extensions: `bcmath`, `gmp`, `gd`, `imagick`:
+Pass `--extensions` to merge PHP extension install blocks (apt packages plus `docker-php-ext-install`/`pecl` lines) directly into `docker/app/Dockerfile`, instead of hand-editing it afterward — supported extensions: `bcmath`, `gmp`, `gd`, `imagick`, `memcached`, `apcu` (with `apc.enable_cli=1`):
 
 ```
 vendor/bin/docker-init --extensions=gmp,bcmath
 vendor/bin/docker-init --extensions=gd,imagick
+vendor/bin/docker-init --extensions=memcached,apcu
 ```
 
 When run from a module directory inside this monorepo, any requested extension not already present is also merged into the shared root `docker/app/Dockerfile` — the container `composer full` at the root actually runs against, distinct from the module's own standalone image.
@@ -266,27 +270,33 @@ When adding a new module, add `"$ROOT/modules/<name>"` to the `PACKAGES` array i
 ```
 src/
   SchemaGenerator.php          — walks a class's typed properties via reflection and
-                                  emits a JSON Schema document; recurses into nested classes
+                                  emits a JSON Schema document; inlines nested classes,
+                                  unions → anyOf, cycles → $ref (+ $defs); generateDefinitions()
+                                  for embedding (e.g. #/components/schemas/)
   Attribute/
     Property.php                — optional per-property override (description, format,
                                    pattern, minimum, maximum) merged into the derived fragment
     Ignore.php                  — excludes a property from the emitted schema entirely
   Exception/
     JsonSchemaException.php     — base exception for this package (extend for new cases)
-    UnsupportedTypeException.php — thrown for an untyped property, an unsupported union,
-                                    or a type with no JSON Schema mapping
+    UnsupportedTypeException.php — thrown for an untyped property, an intersection type,
+                                    `mixed`, or a type with no JSON Schema mapping
 tests/
   TestCase.php                  — module's PHPUnit base class
   SchemaGeneratorTest.php        — scalar/enum/nested-object mapping, nullable/default
                                     handling, ignored properties, unsupported-type errors,
-                                    recursive-reference rejection, #[Property] fields,
+                                    anyOf unions, $ref/$defs for cycles, generateDefinitions(),
+                                    #[Property] fields,
                                     untyped/intersection errors, depth-3 nesting
   Fixtures/
     Address.php, Status.php, Person.php, Event.php — fixture classes exercising nested
       objects, backed enums, DateTimeInterface, nullable-with-default properties
-    UnsupportedUnion.php, MixedProperty.php — fixtures for the unsupported-type error paths
+    UnsupportedUnion.php        — int|string property (named for its former rejection; now anyOf)
+    MixedProperty.php           — `mixed` property, still unsupported
     JsonSchemaTreeNode.php, JsonSchemaCycleParent.php, JsonSchemaCycleChild.php — self- and
-      mutual-reference fixtures for the recursive-reference rejection
+      mutual-reference fixtures ($ref to the root)
+    JsonSchemaCycleHolder.php   — a cycle below the root ($defs + $ref)
+    JsonSchemaUnions.php        — scalar, class/enum and nullable union properties (anyOf)
     JsonSchemaOrder.php         — sibling reuse of one class (must not count as a cycle)
     JsonSchemaConstrained.php   — every #[Property] field, incl. on a nullable property
     JsonSchemaUntyped.php, JsonSchemaIntersection.php — untyped / intersection-type error paths
@@ -301,9 +311,12 @@ tests/
   every public, non-static property (skipping ones carrying `#[Ignore]`), maps each
   property's declared type to a JSON Schema fragment, applies any `#[Property(...)]`
   override, and collects properties without a default/nullable type into `required`.
-  Nested class-typed properties recurse into `generate()` for that class; a stack of the
-  classes on the current path (`$ancestors`, pushed/popped in `try`/`finally`) rejects a
-  recursive reference before it recurses.
+  Nested class-typed properties are inlined; a stack of the classes on the current path
+  (`$ancestors`, pushed/popped in `try`/`finally`) turns a recursive reference into a `$ref`
+  before it recurses — `#` for the root class, `<refPrefix><ShortName>` for any other class,
+  whose schema is then generated once into `$defs`. `generateDefinitions()` returns root and
+  cycle classes as a name → schema map where every reference, the root's included, uses the
+  constructor's `$refPrefix` (default `#/$defs/`; `ez-php/openapi` passes `#/components/schemas/`).
 - **`Attribute\Property`** — a plain data-holder attribute; `SchemaGenerator` merges its
   non-null fields into the fragment it already derived from reflection, so it only ever
   adds detail (description, format, pattern, minimum, maximum) rather than replacing the
@@ -311,7 +324,7 @@ tests/
 - **`Attribute\Ignore`** — a marker attribute; `SchemaGenerator` checks for its presence
   and skips the property before any type resolution happens.
 - **`Exception\UnsupportedTypeException`** — the failure mode for every type this package
-  deliberately does not support (untyped property, non-nullable union, `mixed`, an
+  deliberately does not support (untyped property, intersection type, `mixed`, an
   unrecognized class/interface). Carries the class, property name, and reason in its
   message via the `forProperty()` factory.
 
@@ -324,18 +337,18 @@ tests/
   reflection cannot express (`description`, `format`, `pattern`, `minimum`, `maximum`).
   There is no attribute that overrides the inferred `type` itself — that would let the
   schema silently diverge from what the class actually accepts.
-- **Nullable is "exactly one non-null type", not general unions.** A property typed
-  `?Foo` or `Foo|null` is supported (nullable `Foo`); a property typed `int|string` throws
-  `UnsupportedTypeException`. JSON Schema can express arbitrary unions via `oneOf`, but
-  supporting that generally would mean guessing which PHP union member a given JSON value
-  round-trips to — out of scope for a first pass (see README "What it does not do").
-  `mixed` is likewise rejected, consistent with the project's "avoid `mixed`" guideline.
-- **Recursive class graphs are rejected, not referenced.** Nested classes are inlined, so a
-  self- or mutually-referencing class would recurse forever. `SchemaGenerator` tracks the
-  classes on the current path (ancestors, not every class seen, so sibling reuse such as
-  `Address $billing` + `Address $shipping` still works) and throws `UnsupportedTypeException`
-  from the property that closes the cycle. Emitting `$ref`/`$defs` instead would change the
-  output shape for every consumer (including `ez-php/openapi`) and is out of scope here.
+- **Unions map to `anyOf`, not `oneOf`.** `int|string` becomes `{"anyOf": [{type: string}, {type: integer}]}`
+  (members in PHP's canonical union order), a nullable union adds `{"type": "null"}`. `oneOf`
+  would be wrong: it demands exactly one matching member, and JSON Schema members overlap
+  (`5` is both an `integer` and a `number`; a date-time string is also a `string`) while PHP
+  accepts any member. A single type stays a plain fragment (`?Foo` → nullable `Foo`, as before).
+  `mixed` is still rejected, consistent with the project's "avoid `mixed`" guideline.
+- **Only cycles become references; everything else stays inlined.** Output for acyclic classes
+  is unchanged, so existing consumers see the same schemas. A cycle is detected per path
+  (ancestors, not every class seen, so sibling reuse such as `Address $billing` + `Address
+  $shipping` stays inlined). A nullable `$ref` is `anyOf: [$ref, {type: null}]`, since a `$ref`
+  can't carry a type. `generateDefinitions()` exists because `#` would point at the wrong
+  document once a schema is embedded elsewhere (OpenAPI's `components.schemas`).
 - **No PHPDoc parsing.** Array item types (`array<Foo>`), template generics, and similar
   are PHPDoc-only conventions with no reflection API — an `array`-typed property always
   emits a bare `{"type": "array"}`. Adding items-type inference would require a PHPDoc
@@ -373,5 +386,5 @@ tests/
 | Validating a value/payload against a schema | `ez-php/validation`, or an external JSON Schema validator — this package only emits schemas |
 | OpenAPI document assembly (`#/components/schemas`, paths, `$ref` wiring) | `ez-php/openapi`, which may optionally call `SchemaGenerator` per-DTO but owns the surrounding document |
 | PHPDoc-based generics/array-item type inference | Out of scope — would require a PHPDoc parser dependency; `array` properties stay untyped (`{"type": "array"}`) |
-| General union-type (`oneOf`) support | Out of scope for this first pass — only "single type, optionally nullable" is supported |
-| `$ref`/`$defs` output for recursive class graphs | Out of scope — recursive references are rejected with `UnsupportedTypeException` |
+| Discriminated unions (`oneOf` + `discriminator`) | Out of scope — unions are plain `anyOf` |
+| `$ref`/`$defs` for acyclic reuse (deduplicating inlined classes) | Out of scope — only cycles are referenced |
