@@ -81,8 +81,8 @@ produces:
 - No `$ref` for plain reuse — nested classes are inlined; only a recursive reference
   (`?Node $next`, `Parent` → `Child` → `Parent`) becomes a `$ref` (`#` for the root class,
   `#/$defs/<Name>` otherwise).
-- No JSON Schema validation against a value — this package only *emits* schemas. Validating
-  data against a schema is the `ez-php/validation` module's job, or an external library.
+- No JSON Schema validation against a value — this package only *emits* schemas. Validate
+  data against them with `ez-php/json-schema-validator`.
 
 ## Requirements
 

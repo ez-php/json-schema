@@ -151,9 +151,9 @@ php make_module.php <name> --description="..." --services=mysql,redis --extensio
 
 `<name>` is the kebab-case package name; the namespace is derived as
 `EzPhp\<PascalCase>` (each `-`-separated word upper-cased) unless `--namespace=`
-overrides it. Existing exceptions the guess gets wrong: `bignum` → `BigNum`,
-`dataloader` → `DataLoader`, `dotenv` → `Env`, `graphql` → `GraphQL`, `graphql-subscriptions` → `GraphQLSubscriptions`, `oauth` → `OAuth`,
-`opcache` → `OPCache`, `openapi` → `OpenApi`, `swagger-ui` → `SwaggerUI`, `webauthn` → `WebAuthn` and
+overrides it. Existing exceptions the guess gets wrong: `asyncapi` → `AsyncApi`,
+`bignum` → `BigNum`, `dataloader` → `DataLoader`, `dotenv` → `Env`, `graphql` → `GraphQL`, `graphql-subscriptions` → `GraphQLSubscriptions`, `oauth` → `OAuth`,
+`opcache` → `OPCache`, `openapi` → `OpenApi`, `qrcode` → `QrCode`, `swagger-ui` → `SwaggerUI`, `webauthn` → `WebAuthn` and
 `websocket` → `WebSocket`; `websocket-client` → `WebsocketClient`, `websocket-tls` → `WebsocketTls`,
 `webauthn-metadata` → `WebauthnMetadata` and `metrics-statsd` → `MetricsStatsd` are
 intentional lower-case-word namespaces, and `testing-application` shares `EzPhp\Testing\`
@@ -356,8 +356,9 @@ tests/
   emits a bare `{"type": "array"}`. Adding items-type inference would require a PHPDoc
   parser dependency this package deliberately avoids (see "no heavy dependencies").
 - **No validation.** This package only emits schemas from PHP types; validating a JSON
-  payload against a schema (or against PHP data) is `ez-php/validation`'s job, or an
-  external JSON Schema validator the application chooses to add itself.
+  payload against them is `ez-php/json-schema-validator`'s job (it supports exactly the
+  keyword subset emitted here, plus `items`). A keyword added to the generator must be
+  added there too, or validating a generated schema throws.
 - **Attached as a git submodule**, not scaffolded from `make_module.php`'s generated-package
   path. The upstream repository was still empty (README only) when attached, so the full
   required-file set (composer.json, phpstan.neon, Docker scaffold, etc.) and the first-pass
@@ -385,7 +386,7 @@ tests/
 
 | Concern | Where it belongs |
 |---|---|
-| Validating a value/payload against a schema | `ez-php/validation`, or an external JSON Schema validator — this package only emits schemas |
+| Validating a value/payload against a schema | `ez-php/json-schema-validator` — this package only emits schemas |
 | OpenAPI document assembly (`#/components/schemas`, paths, `$ref` wiring) | `ez-php/openapi`, which may optionally call `SchemaGenerator` per-DTO but owns the surrounding document |
 | PHPDoc-based generics/array-item type inference | Out of scope — would require a PHPDoc parser dependency; `array` properties stay untyped (`{"type": "array"}`) |
 | Discriminated unions (`oneOf` + `discriminator`) | Out of scope — unions are plain `anyOf` |
